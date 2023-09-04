@@ -1,0 +1,122 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.Sockets;
+using System.Text;
+using Newtonsoft.Json;
+using System.Linq;
+using System.Net;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        string HOST = "127.0.0.1"; // Replace with the actual server address
+        int PORT = 3000;
+
+        try
+        {
+            TcpClient clientSocket = new TcpClient();
+            clientSocket.Connect(HOST, PORT);
+
+            NetworkStream networkStream = clientSocket.GetStream();
+
+            // Step 1: Send request for "Stream All Packets"
+            byte[] requestPayload = CreatePayload(1);
+            networkStream.Write(requestPayload, 0, requestPayload.Length);
+
+            List<Dictionary<string, object>> packets = new List<Dictionary<string, object>>();
+
+            while (true)
+            {
+                byte[] response = new byte[17];
+                int bytesRead = networkStream.Read(response, 0, response.Length);
+
+                if (bytesRead == 0)
+                {
+                    break; // Server closed connection
+                }
+
+                Dictionary<string, object> packet = ParsePacket(response);
+                packets.Add(packet);
+            }
+
+            // Close the connection
+            clientSocket.Close();
+
+            // Reconnect to request missing packets
+            clientSocket = new TcpClient();
+            clientSocket.Connect(HOST, PORT);
+
+            networkStream = clientSocket.GetStream();
+
+            // Step 2: Send request for connection again (if needed)
+
+            // Step 3: Identify missing packets
+            int lastPacketSequence = Convert.ToInt32(packets[packets.Count - 1]["packetSequence"]);
+            HashSet<int> receivedSequences = new HashSet<int>(packets.ConvertAll(packet => Convert.ToInt32(packet["packetSequence"])));
+            HashSet<int> missingSequences = new HashSet<int>(Enumerable.Range(1, lastPacketSequence).Except(receivedSequences));
+
+            // Step 4: Request and receive missing packets
+            foreach (int sequence in missingSequences)
+            {
+                byte[] resendPayload = CreatePayload(2, sequence);
+                networkStream.Write(resendPayload, 0, resendPayload.Length);
+
+                byte[] response = new byte[18];
+                int bytesRead = networkStream.Read(response, 0, response.Length);
+
+                Dictionary<string, object> packet = ParsePacket(response);
+                packets.Add(packet);
+            }
+
+            // Step 5: Sort packets based on sequence
+            packets.Sort((a, b) => Convert.ToInt32(a["packetSequence"]).CompareTo(Convert.ToInt32(b["packetSequence"])));
+
+            // Step 6: Generate JSON output
+            string jsonOutput = JsonConvert.SerializeObject(packets, Formatting.Indented);
+            string outputFilePath = @"C:\output.json"; // Change the path as needed
+            File.WriteAllText(outputFilePath, jsonOutput);
+
+            Console.WriteLine($"JSON data saved to: {outputFilePath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error: " + ex.Message);
+        }
+    }
+
+    static byte[] CreatePayload(int callType, int resendSeq = 0)
+    {
+        if (callType == 1)
+        {
+            return new byte[] { 1, 0 }; // Stream All Packets
+        }
+        else if (callType == 2 && resendSeq != 0)
+        {
+            return new byte[] { 2, (byte)resendSeq }; // Resend Packet
+        }
+        else
+        {
+            throw new ArgumentException("Invalid callType or missing resendSeq");
+        }
+    }
+
+    static Dictionary<string, object> ParsePacket(byte[] data)
+    {
+        string symbol = Encoding.UTF8.GetString(data, 0, 4);
+        string buysellindicator = Encoding.UTF8.GetString(data, 4, 1);
+        int quantity = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, 5)); // Read as big endian
+        int price = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, 9)); // Read as big endian
+        int packetSequence = IPAddress.NetworkToHostOrder(BitConverter.ToInt32(data, 13)); // Read as big endian
+
+        return new Dictionary<string, object>
+        {
+            { "symbol", symbol },
+            { "buysellindicator", buysellindicator },
+            { "quantity", quantity },
+            { "price", price },
+            { "packetSequence", packetSequence }
+        };
+    }
+}
